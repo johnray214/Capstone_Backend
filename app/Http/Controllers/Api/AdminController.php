@@ -37,7 +37,6 @@ use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use App\Services\AuditLogger;
-use CloudinaryLabs\CloudinaryLaravel\Facades\Cloudinary;
 
 class AdminController extends Controller
 {
@@ -59,6 +58,8 @@ class AdminController extends Controller
         $startOfWeek = $now->copy()->startOfWeek();
         $endOfWeek = $now->copy()->endOfWeek();
         $transactionQuery->whereBetween('date_time', [$startOfWeek, $endOfWeek]);
+    } elseif ($period === 'today') {
+        $transactionQuery->whereDate('date_time', $now->toDateString());
     }
 
     $totalViolators = Violator::whereHas('transactions', function($q) use ($period, $now) {
@@ -69,6 +70,8 @@ class AdminController extends Controller
               ->whereMonth('date_time', $now->month);
         } elseif ($period === 'week') {
             $q->whereBetween('date_time', [$now->copy()->startOfWeek(), $now->copy()->endOfWeek()]);
+        } elseif ($period === 'today') {
+            $q->whereDate('date_time', $now->toDateString());
         }
     })->count();
 
@@ -81,6 +84,8 @@ class AdminController extends Controller
                   ->whereMonth('date_time', $now->month);
             } elseif ($period === 'week') {
                 $q->whereBetween('date_time', [$now->copy()->startOfWeek(), $now->copy()->endOfWeek()]);
+            } elseif ($period === 'today') {
+                $q->whereDate('date_time', $now->toDateString());
             }
         });
     };
@@ -94,6 +99,8 @@ class AdminController extends Controller
                   ->whereMonth('date_time', $now->month);
             } elseif ($period === 'week') {
                 $q->whereBetween('date_time', [$now->copy()->startOfWeek(), $now->copy()->endOfWeek()]);
+            } elseif ($period === 'today') {
+                $q->whereDate('date_time', $now->toDateString());
             }
         }])
         ->having('transactions_count', '>', 1)
@@ -107,10 +114,10 @@ class AdminController extends Controller
         'total_revenue'        => (clone $transactionQuery)->where('status', 'Paid')->sum('fine_amount'),
         'pending_revenue'      => (clone $transactionQuery)->where('status', 'Pending')->sum('fine_amount'),
         'repeat_offenders'     => $repeatOffenders,
-        'active_enforcers'     => Enforcer::where('status', 'active')->count(),
-        'active_admins'        => Admin::where('status', 'active')->count(),
-        'active_deputies'      => Deputy::where('status', 'active')->count(),
-        'active_heads'         => Head::where('status', 'active')->count(),
+        'active_enforcers'     => Enforcer::where('status', 'activated')->count(),
+        'active_admins'        => Admin::where('status', 'activated')->count(),
+        'active_deputies'      => Deputy::where('status', 'activated')->count(),
+        'active_heads'         => Head::where('status', 'activated')->count(),
     ];
 
     // Trends 
@@ -136,12 +143,34 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
     ->orderBy('year', 'asc')
     ->get();
 
-    $commonViolations = Violation::withCount('transactions')
+    $commonViolations = Violation::withCount(['transactions' => function($q) use ($period, $now) {
+        if ($period === 'year') {
+            $q->whereYear('date_time', $now->year);
+        } elseif ($period === 'month') {
+            $q->whereYear('date_time', $now->year)
+              ->whereMonth('date_time', $now->month);
+        } elseif ($period === 'week') {
+            $q->whereBetween('date_time', [$now->copy()->startOfWeek(), $now->copy()->endOfWeek()]);
+        } elseif ($period === 'today') {
+            $q->whereDate('date_time', $now->toDateString());
+        }
+    }])
         ->orderBy('transactions_count', 'desc')
         ->limit(5)
         ->get();
 
-    $enforcerPerformance = Enforcer::with('transactions')->get();
+    $enforcerPerformance = Enforcer::with(['transactions' => function($q) use ($period, $now) {
+        if ($period === 'year') {
+            $q->whereYear('date_time', $now->year);
+        } elseif ($period === 'month') {
+            $q->whereYear('date_time', $now->year)
+              ->whereMonth('date_time', $now->month);
+        } elseif ($period === 'week') {
+            $q->whereBetween('date_time', [$now->copy()->startOfWeek(), $now->copy()->endOfWeek()]);
+        } elseif ($period === 'today') {
+            $q->whereDate('date_time', $now->toDateString());
+        }
+    }])->get();
 
     // Trend percentage (affected by period)
     if ($period === 'all') {
@@ -172,6 +201,9 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                 $now->copy()->subWeek()->startOfWeek(), 
                 $now->copy()->subWeek()->endOfWeek()
             ]);
+        } elseif ($period === 'today') {
+            $currentPeriodQuery->whereDate('date_time', $now->toDateString());
+            $previousPeriodQuery->whereDate('date_time', $now->copy()->subDay()->toDateString());
         }
 
         $currentTransactions = $currentPeriodQuery->count();
@@ -197,7 +229,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
     }], 'fine_amount')
     ->with(['transactions' => function($q) {
         $q->where('status', 'Pending')
-          ->select('id', 'violator_id', 'location', 'created_at', 'fine_amount');
+          ->select('id', 'violator_id', 'location', 'created_at', 'date_time', 'fine_amount');
     }])
     ->having('transactions_count', '>', 0)
     ->get();
@@ -207,8 +239,11 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
     // Process each violator and check days pending
     $unsettledViolators = $allViolatorsWithPending->map(function($violator) {
         $daysPending = $violator->transactions->map(function($transaction) {
-            return now()->diffInDays($transaction->created_at);
+            return now()->diffInDays($transaction->date_time);
         })->min();
+        
+        // Get the most recent apprehension date
+        $latestApprehension = $violator->transactions->max('date_time');
         
         \Log::info("Violator {$violator->id}: days pending = {$daysPending}");
         
@@ -220,25 +255,107 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'total_amount' => $violator->transactions_sum_fine_amount ?? 0,
             'days_pending' => $daysPending,
             'urgency_level' => $daysPending >= 5 ? 'alert' : ($daysPending >= 3 ? 'warning' : 'info'),
-            'locations' => $violator->transactions->pluck('location')->unique()->values()
+            'locations' => $violator->transactions->pluck('location')->unique()->values(),
+            'apprehension_date' => $latestApprehension ? $latestApprehension->format('M d, Y') : 'N/A'
         ];
     })
     ->sortByDesc('total_amount')
+    ->take(10)
     ->values();
     
-    // Get location data for heatmap (all pending transactions)
-    $locationData = Transaction::where('status', 'Pending')
-        ->selectRaw('location, COUNT(*) as count, SUM(fine_amount) as total_amount')
+    // Get location data for heatmap (all pending transactions with GPS coordinates)
+    $locationQuery = Transaction::where('status', 'Pending')
+        ->whereNotNull('gps_latitude')
+        ->whereNotNull('gps_longitude');
+    
+    // Apply period filter if specified
+    $heatmapPeriod = $request->get('heatmap_period', 'all');
+    if ($heatmapPeriod !== 'all') {
+        switch ($heatmapPeriod) {
+            case 'today':
+                $locationQuery->whereDate('created_at', $now->toDateString());
+                break;
+            case 'week':
+                $locationQuery->whereBetween('created_at', [
+                    $now->startOfWeek()->toDateTimeString(),
+                    $now->endOfWeek()->toDateTimeString()
+                ]);
+                break;
+            case 'month':
+                $locationQuery->whereMonth('created_at', $now->month)
+                    ->whereYear('created_at', $now->year);
+                break;
+        }
+    }
+    
+    // Group by location name and get the most common GPS coordinates for each location
+    $locationData = $locationQuery
+        ->selectRaw('location, 
+                     AVG(gps_latitude) as gps_latitude, 
+                     AVG(gps_longitude) as gps_longitude, 
+                     COUNT(*) as count, 
+                     SUM(fine_amount) as total_amount')
         ->groupBy('location')
         ->orderByDesc('count')
         ->get()
         ->map(function($item) {
+            // Clean up location names
+            $locationName = trim($item->location);
+            
+            // Debug: Log what we're processing
+            \Log::info("Processing location: '{$locationName}' with count: {$item->count}");
+            
+            // Only generate new names for truly generic/empty locations OR GPS coordinates
+            // Preserve ALL specific location names (from mobile app, seeder, etc.)
+            // Check if location looks like GPS coordinates (e.g., "14.1234, 121.5678")
+            $isGpsCoordinate = preg_match('/^-?\d+\.\d+,\s*-?\d+\.\d+$/', trim($locationName));
+            
+            if (empty($locationName) || 
+                $locationName === 'GPS Location' || 
+                $locationName === 'Unknown Location' ||
+                $isGpsCoordinate ||
+                strpos($locationName, 'Location at') === 0 ||
+                strpos($locationName, 'Echague, Isabela Area') === 0 ||
+                strpos($locationName, 'Echague Town Center') === 0 ||
+                strpos($locationName, 'Near Echague Municipal Hall') === 0 ||
+                strpos($locationName, 'Echague Market Area') === 0 ||
+                strpos($locationName, 'Echague Residential Area') === 0) {
+                
+                \Log::info("Generating new name for: '{$locationName}'");
+                
+                // Create a more meaningful location name based on coordinates
+                $lat = round($item->gps_latitude, 4);
+                $lng = round($item->gps_longitude, 4);
+                
+                // Try to get a better location name using reverse geocoding
+                $locationName = $this->getBetterLocationName($lat, $lng);
+                
+                \Log::info("Generated new name: '{$locationName}'");
+            } else {
+                \Log::info("Preserving original name: '{$locationName}'");
+            }
+            // If location name is not empty and not generic, keep it as is
+            
             return [
-                'location' => $item->location,
-                'count' => $item->count,
+                'location' => $locationName,
+                'gps_latitude' => round($item->gps_latitude, 6),
+                'gps_longitude' => round($item->gps_longitude, 6),
+                'count' => (int)$item->count,
                 'total_amount' => $item->total_amount
             ];
         });
+    
+    // Debug: Log all transactions with GPS coordinates
+    $allGpsTransactions = Transaction::where('status', 'Pending')
+        ->whereNotNull('gps_latitude')
+        ->whereNotNull('gps_longitude')
+        ->get(['id', 'location', 'gps_latitude', 'gps_longitude', 'fine_amount', 'created_at']);
+    
+    \Log::info('All GPS transactions count: ' . $allGpsTransactions->count());
+    \Log::info('All GPS transactions: ' . $allGpsTransactions->toJson());
+    
+    // Debug: Log location data for heatmap
+    \Log::info('Location heatmap data: ' . $locationData->toJson());
     
     \Log::info('Unsettled violators count: ' . $unsettledViolators->count());
     \Log::info('Location data count: ' . $locationData->count());
@@ -268,6 +385,158 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             ],
         ]
     ]);
+}
+
+/**
+ * Get a better location name using multiple strategies
+ */
+private function getBetterLocationName($latitude, $longitude)
+{
+    // Strategy 1: Check if coordinates are in known areas of Echague
+    $knownAreas = $this->getKnownEchagueAreas($latitude, $longitude);
+    if ($knownAreas) {
+        return $knownAreas;
+    }
+    
+    // Strategy 2: Try reverse geocoding with multiple providers
+    $reverseGeocoded = $this->reverseGeocodeLocation($latitude, $longitude);
+    if ($reverseGeocoded && !str_contains($reverseGeocoded, 'Location at')) {
+        return $reverseGeocoded;
+    }
+    
+    // Strategy 3: Create a descriptive location based on coordinates
+    $lat = round($latitude, 4);
+    $lng = round($longitude, 4);
+    
+    // Check if coordinates are in Echague, Isabela area
+    if ($lat >= 16.6 && $lat <= 16.8 && $lng >= 121.6 && $lng <= 121.8) {
+        return "Echague, Isabela Area";
+    }
+    
+    return "Location at {$lat}, {$lng}";
+}
+
+/**
+ * Check if coordinates are in known areas of Echague
+ */
+private function getKnownEchagueAreas($latitude, $longitude)
+{
+    // Define known areas in Echague with their approximate coordinates
+    $knownAreas = [
+        // Echague Town Center
+        ['name' => 'Echague Town Center', 'lat_min' => 16.700, 'lat_max' => 16.720, 'lng_min' => 121.660, 'lng_max' => 121.680],
+        
+        // Near Municipal Hall
+        ['name' => 'Near Echague Municipal Hall', 'lat_min' => 16.705, 'lat_max' => 16.715, 'lng_min' => 121.665, 'lng_max' => 121.675],
+        
+        // Market Area
+        ['name' => 'Echague Market Area', 'lat_min' => 16.695, 'lat_max' => 16.710, 'lng_min' => 121.650, 'lng_max' => 121.670],
+        
+        // Residential Areas
+        ['name' => 'Echague Residential Area', 'lat_min' => 16.680, 'lat_max' => 16.740, 'lng_min' => 121.640, 'lng_max' => 121.690],
+        
+        // Specific Locations with Accurate Coordinates
+        ['name' => 'Echague Police Station Area', 'lat_min' => 16.715, 'lat_max' => 16.716, 'lng_min' => 121.682, 'lng_max' => 121.684],
+        ['name' => 'Savemore Market Area', 'lat_min' => 16.705, 'lat_max' => 16.706, 'lng_min' => 121.676, 'lng_max' => 121.677],
+        ['name' => 'Echague Poblacion Road Area', 'lat_min' => 16.721, 'lat_max' => 16.722, 'lng_min' => 121.685, 'lng_max' => 121.686],
+    ];
+    
+    foreach ($knownAreas as $area) {
+        if ($latitude >= $area['lat_min'] && $latitude <= $area['lat_max'] &&
+            $longitude >= $area['lng_min'] && $longitude <= $area['lng_max']) {
+            return $area['name'];
+        }
+    }
+    
+    return null;
+}
+
+/**
+ * Reverse geocode GPS coordinates to get a readable location name
+ */
+private function reverseGeocodeLocation($latitude, $longitude)
+{
+    try {
+        $client = new \GuzzleHttp\Client();
+        
+        // Try Mapbox first (better for rural areas)
+        try {
+            $mapboxResponse = $client->get("https://api.mapbox.com/geocoding/v5/mapbox.places/{$longitude},{$latitude}.json", [
+                'query' => [
+                    'access_token' => env('MAPBOX_ACCESS_TOKEN', 'pk.eyJ1IjoieXVqb2hucmF5IiwiYSI6ImNtaDczcG94MDBubGgybHNieml0ZmJ6bmwifQ.KRR3neB3mYayV6L8sN71uA'),
+                    'types' => 'address,poi,place',
+                    'limit' => 1
+                ]
+            ]);
+            
+            $mapboxData = json_decode($mapboxResponse->getBody(), true);
+            
+            if (isset($mapboxData['features']) && count($mapboxData['features']) > 0) {
+                $feature = $mapboxData['features'][0];
+                return $feature['place_name'] ?? $feature['text'] ?? "Location at {$latitude}, {$longitude}";
+            }
+        } catch (\Exception $e) {
+            \Log::info('Mapbox geocoding failed, trying OpenStreetMap: ' . $e->getMessage());
+        }
+        
+        // Fallback to OpenStreetMap
+        $response = $client->get("https://nominatim.openstreetmap.org/reverse", [
+            'query' => [
+                'format' => 'json',
+                'lat' => $latitude,
+                'lon' => $longitude,
+                'addressdetails' => 1,
+                'zoom' => 18
+            ],
+            'headers' => [
+                'User-Agent' => 'POSU-System/1.0'
+            ]
+        ]);
+        
+        $data = json_decode($response->getBody(), true);
+        
+        if (isset($data['address'])) {
+            $address = $data['address'];
+            
+            // Build a readable address
+            $parts = [];
+            
+            if (!empty($address['house_number'])) {
+                $parts[] = $address['house_number'];
+            }
+            
+            if (!empty($address['road'])) {
+                $parts[] = $address['road'];
+            } elseif (!empty($address['street'])) {
+                $parts[] = $address['street'];
+            }
+            
+            if (!empty($address['suburb'])) {
+                $parts[] = $address['suburb'];
+            }
+            
+            if (!empty($address['city'])) {
+                $parts[] = $address['city'];
+            } elseif (!empty($address['town'])) {
+                $parts[] = $address['town'];
+            }
+            
+            if (!empty($address['state'])) {
+                $parts[] = $address['state'];
+            }
+            
+            if (!empty($parts)) {
+                return implode(', ', $parts);
+            }
+        }
+        
+        // Fallback to coordinates if reverse geocoding fails
+        return "Location at {$latitude}, {$longitude}";
+        
+    } catch (\Exception $e) {
+        \Log::error('Reverse geocoding failed: ' . $e->getMessage());
+        return "Location at {$latitude}, {$longitude}";
+    }
 }
 
     /* ==============================
@@ -372,7 +641,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'username'     => 'required|string|max:255|unique:admins,username|unique:heads,username|unique:deputies,username|unique:enforcers,username',
             'office'       => 'required|string|max:255',
             'password'     => 'required|string|min:6',
-            'status'       => 'required|in:active,inactive,deactivate',
+            'status'       => 'required|in:activated,inactive,deactivated',
             'image'        => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
             'user_type'    => 'required|in:' . implode(',', $manageableTypes),
         ]);
@@ -395,11 +664,8 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         ];
 
         if ($request->hasFile('image')) {
-            $upload = Cloudinary::upload($request->file('image')->getRealPath(), [
-                'folder' => 'posu/profile_images',
-                'resource_type' => 'image',
-            ]);
-            $userData['image'] = $upload->getSecurePath();
+            $path = $request->file('image')->store('profile_images', 'public');
+            $userData['image'] = $path;
         }
 
         $modelClass = $this->getModelClass($userType);
@@ -482,7 +748,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'last_name'   => 'sometimes|string|max:255',
             'username'    => 'sometimes|string|max:255|unique:' . $user->getTable() . ',username,' . $id,
             'email'       => 'sometimes|email|unique:' . $user->getTable() . ',email,' . $id,
-            'status'      => 'sometimes|in:active,inactive,deactivate',
+            'status'      => 'sometimes|in:activated,inactive,deactivated',
             'image'       => 'sometimes|nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
@@ -492,11 +758,8 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
 
         // Handle image upload
         if ($request->hasFile('image')) {
-            $upload = Cloudinary::upload($request->file('image')->getRealPath(), [
-                'folder' => 'posu/profile_images',
-                'resource_type' => 'image',
-            ]);
-            $user->image = $upload->getSecurePath();
+            $path = $request->file('image')->store('profile_images', 'public');
+            $user->image = $path;
         }
 
         if ($request->has('first_name')) {
@@ -798,16 +1061,14 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'prepared_by_name' => $actorName,
         ]);
 
-        // Audit: report generated with user-friendly description
-        $reportTypeLabel = $this->getReportTypeLabel($report->type);
-        $periodLabel = $this->getPeriodLabel($request->period);
-        $desc = "$actorName generated a '$reportTypeLabel' report for the period '$periodLabel'";
+        // Audit: report generated
+        $desc = "$actorName generated a '{$report->type}' report for period '{$request->period}'";
         AuditLogger::log(
             $actor,
             'Report Generated',
             'Report',
             $report->id,
-            $reportTypeLabel,
+            $report->type,
             [],
             $request,
             $desc
@@ -853,14 +1114,20 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'period' => 'required|in:today,yesterday,last_7_days,last_30_days,last_3_months,last_6_months,last_year,year_to_date,custom',
             'start_date' => 'required_if:period,custom|date',
             'end_date' => 'required_if:period,custom|date|after:start_date',
+            'limit' => 'sometimes|integer|min:1|max:1000',
+            'per_page' => 'sometimes|integer|min:1|max:1000',
+            'page_size' => 'sometimes|integer|min:1|max:1000',
         ]);
 
         // Get date range based on period
         $dateRange = $this->calculateDateRange($request->period, $request->start_date, $request->end_date);
 
+        // Get pagination parameters
+        $limit = $request->input('limit', $request->input('per_page', $request->input('page_size', 100)));
+
         // Get data based on type
         $type = $request->input('type');
-        $data = $this->getReportData($type, $dateRange);
+        $data = $this->getReportData($type, $dateRange, $limit);
 
         return response()->json([
             'status' => 'success',
@@ -874,23 +1141,23 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         ]);
     }
 
-    private function getReportData($type, $dateRange)
+    private function getReportData($type, $dateRange, $limit = 100)
     {
         switch ($type) {
             case 'all_violators':
-                return $this->getAllViolatorsData($dateRange);
+                return $this->getAllViolatorsData($dateRange, $limit);
             case 'common_violations':
-                return $this->getCommonViolationsData($dateRange);
+                return $this->getCommonViolationsData($dateRange, $limit);
             case 'enforcer_performance':
-                return $this->getEnforcerPerformanceData($dateRange);
+                return $this->getEnforcerPerformanceData($dateRange, $limit);
             case 'total_revenue':
-                return $this->getTotalRevenueData($dateRange);
+                return $this->getTotalRevenueData($dateRange, $limit);
             default:
                 return [];
         }
     }
 
-    private function getAllViolatorsData($dateRange)
+    private function getAllViolatorsData($dateRange, $limit = 100)
     {
         return Transaction::with(['violator', 'violation', 'vehicle', 'apprehendingOfficer'])
             ->whereBetween('date_time', [$dateRange['start'], $dateRange['end']])
@@ -904,17 +1171,17 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                     'Status' => $transaction->status ?? 'N/A',
                 ];
             })
-            ->take(10) // Preview only first 10 records
+            ->take($limit)
             ->toArray();
     }
 
-    private function getCommonViolationsData($dateRange)
+    private function getCommonViolationsData($dateRange, $limit = 100)
     {
         return Violation::withCount(['transactions' => function ($query) use ($dateRange) {
             $query->whereBetween('date_time', [$dateRange['start'], $dateRange['end']]);
         }])
             ->orderBy('transactions_count', 'desc')
-            ->take(10)
+            ->take($limit)
             ->get()
             ->map(function ($violation) {
                 return [
@@ -925,7 +1192,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             ->toArray();
     }
 
-    private function getEnforcerPerformanceData($dateRange)
+    private function getEnforcerPerformanceData($dateRange, $limit = 100)
     {
         return Enforcer::with(['transactions' => function ($q) use ($dateRange) {
             $q->whereBetween('date_time', [$dateRange['start'], $dateRange['end']]);
@@ -944,12 +1211,12 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                 ];
             })
             ->filter(fn($item) => $item['Violations Issued'] > 0)
-            ->take(10)
+            ->take($limit)
             ->values()
             ->toArray();
     }
 
-    private function getTotalRevenueData($dateRange)
+    private function getTotalRevenueData($dateRange, $limit = 100)
     {
         $totalPenalty = Transaction::whereBetween('date_time', [$dateRange['start'], $dateRange['end']])
             ->sum('fine_amount');
@@ -1046,39 +1313,6 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         return response()->json([
             'message' => 'Report history cleared successfully (files deleted).'
         ]);
-    }
-
-    /**
-     * Get user-friendly report type label
-     */
-    private function getReportTypeLabel($type)
-    {
-        $labels = [
-            'total_revenue' => 'Total Revenue',
-            'all_violators' => 'All Violators',
-            'common_violations' => 'Common Violations',
-            'enforcer_performance' => 'Enforcer Performance'
-        ];
-        return $labels[$type] ?? ucfirst(str_replace('_', ' ', $type));
-    }
-
-    /**
-     * Get user-friendly period label
-     */
-    private function getPeriodLabel($period)
-    {
-        $labels = [
-            'today' => 'Today',
-            'yesterday' => 'Yesterday',
-            'last_7_days' => 'Last 7 Days',
-            'last_30_days' => 'Last 30 Days',
-            'last_3_months' => 'Last 3 Months',
-            'last_6_months' => 'Last 6 Months',
-            'last_year' => 'Last Year',
-            'year_to_date' => 'Year to Date',
-            'custom' => 'Custom Range'
-        ];
-        return $labels[$period] ?? ucfirst(str_replace('_', ' ', $period));
     }
 
     /**
@@ -1248,7 +1482,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         $validator = Validator::make($request->all(), [
             'user_type' => 'required|in:' . implode(',', $manageableTypes),
             'id' => 'required|integer',
-            'status' => 'required|in:active,inactive,deactivate',
+            'status' => 'required|in:activated,inactive,deactivated',
         ]);
 
         if ($validator->fails()) {
@@ -1310,7 +1544,8 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             ->whereHas('transactions')
             ->withCount('transactions')
             ->withSum('transactions', 'fine_amount')
-            ->with(['transactions.violation', 'transactions.vehicle', 'transactions.apprehendingOfficer']);
+            ->with(['transactions.violation', 'transactions.vehicle', 'transactions.apprehendingOfficer'])
+            ->orderBy('id', 'desc');
 
         if ($name !== '') {
             $query->where(function ($q) use ($name) {
@@ -1433,7 +1668,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         $color       = trim((string) $request->input('color', ''));
         $vehicleType = trim((string) $request->input('vehicle_type', ''));
 
-        $query = Vehicle::with('violator');
+        $query = Vehicle::with('violator')->orderBy('id', 'desc');
 
         if ($ownerName !== '') {
             $query->where(function ($q) use ($ownerName) {
@@ -1564,12 +1799,12 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         AuditLogger::log(
             $actor,
             'Violation Created',
-            'All Violators',
+            'Violation',
             $violation->id,
             $violation->name,
             [],
             $request,
-            "$actorName created a new violation type '{$violation->name}' for the system"
+            "$actorName created violation '{$violation->name}'"
         );
 
         return response()->json(['status' => 'success', 'message' => 'Violation created', 'data' => $violation], 201);
@@ -1597,12 +1832,12 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         AuditLogger::log(
             $actor,
             'Violation Updated',
-            'All Violators',
+            'Violation',
             $violation->id,
             $violation->name,
             [],
             $request,
-            "$actorName updated the violation type '{$violation->name}' in the system"
+            "$actorName updated violation '{$violation->name}'"
         );
 
         return response()->json(['status' => 'success', 'message' => 'Violation updated', 'data' => $violation]);
@@ -1616,19 +1851,20 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
 
     public function getTransactions(Request $request)
     {
-        $perPage = $request->input('per_page', 15);
-        $page    = $request->input('page', 1);
+        try {
+            $perPage = $request->input('per_page', 15);
+            $page    = $request->input('page', 1);
 
-        $search        = trim((string) $request->input('search', ''));
-        $violationId   = $request->input('violation_id');
-        $vehicleType   = trim((string) $request->input('vehicle_type', ''));
-        $repeat        = $request->input('repeat_offender', ''); // '' | true | false
-        $address       = trim((string) $request->input('address', ''));
-        $dateRange     = trim((string) $request->input('dateRange', ''));
-        $dateFrom      = $request->input('dateFrom');
-        $dateTo        = $request->input('dateTo');
+            $search        = trim((string) $request->input('search', ''));
+            $violationId   = $request->input('violation_id');
+            $vehicleType   = trim((string) $request->input('vehicle_type', ''));
+            $repeat        = $request->input('repeat_offender', ''); // '' | true | false
+            $address       = trim((string) $request->input('address', ''));
+            $dateRange     = trim((string) $request->input('dateRange', ''));
+            $dateFrom      = $request->input('dateFrom');
+            $dateTo        = $request->input('dateTo');
 
-        $transactions = Transaction::with([
+            $transactions = Transaction::with([
             'violator' => function ($q) {
                 $q->withCount('transactions');
             },
@@ -1636,17 +1872,16 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
             'violations',
             'vehicle',
             'apprehendingOfficer'
-        ])->orderBy('id', 'asc');
+        ])->orderBy('id', 'desc');
 
         if ($search !== '') {
             $transactions->where(function ($q) use ($search) {
                 $q->where('ticket_number', 'like', "%{$search}%")
-                  // Violator name and license
+                  // Violator name (license_number removed - it's encrypted)
                   ->orWhereHas('violator', function ($vq) use ($search) {
                       $vq->where('first_name', 'like', "%{$search}%")
                          ->orWhere('middle_name', 'like', "%{$search}%")
                          ->orWhere('last_name', 'like', "%{$search}%")
-                         ->orWhere('license_number', 'like', "%{$search}%")
                          ->orWhereRaw("CONCAT_WS(' ', first_name, middle_name, last_name) LIKE ?", ["%{$search}%"]);
                   })
                   // Apprehending officer name
@@ -1657,10 +1892,9 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                          ->orWhere('username', 'like', "%{$search}%")
                          ->orWhereRaw("CONCAT_WS(' ', first_name, middle_name, last_name) LIKE ?", ["%{$search}%"]);
                   })
-                  // Vehicle fields and owner name
+                  // Vehicle fields and owner name (plate_number removed - it's encrypted)
                   ->orWhereHas('vehicle', function ($vq) use ($search) {
-                      $vq->where('plate_number', 'like', "%{$search}%")
-                         ->orWhere('make', 'like', "%{$search}%")
+                      $vq->where('make', 'like', "%{$search}%")
                          ->orWhere('model', 'like', "%{$search}%")
                          ->orWhere('color', 'like', "%{$search}%")
                          ->orWhere('owner_first_name', 'like', "%{$search}%")
@@ -1743,6 +1977,21 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                 $transaction->violator->total_amount = $totalsByViolator[$transaction->violator->id] ?? 0;
             }
 
+            // Process location field - convert generic locations to better names
+            $locationName = trim($transaction->location ?? '');
+            if (empty($locationName) || 
+                $locationName === 'GPS Location' || 
+                $locationName === 'Unknown Location' ||
+                strpos($locationName, 'Location at') === 0) {
+                
+                // If we have GPS coordinates, try to generate a better name
+                if ($transaction->gps_latitude && $transaction->gps_longitude) {
+                    $lat = round($transaction->gps_latitude, 4);
+                    $lng = round($transaction->gps_longitude, 4);
+                    $transaction->location = $this->getBetterLocationName($lat, $lng);
+                }
+            }
+
             // Compute attempt number for this specific transaction (1 for first, 2 for second, ...)
             try {
                 $transaction->attempt_number = Transaction::where('violator_id', $transaction->violator_id)
@@ -1766,6 +2015,16 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         });
 
         return response()->json(['status' => 'success', 'data' => $transactions]);
+        
+        } catch (\Exception $e) {
+            \Log::error('Error in getTransactions: ' . $e->getMessage());
+            \Log::error('Stack trace: ' . $e->getTraceAsString());
+            
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to load transactions: ' . $e->getMessage()
+            ], 500);
+        }
     }
 
     public function updateTransaction(Request $request, $id)
@@ -1809,7 +2068,7 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
                         'license_number' => $transaction->violator->license_number,
                         'vehicle_info' => $vehicleInfo,
                         'plate_number' => $transaction->vehicle ? $transaction->vehicle->plate_number : 'N/A',
-                        'login_url' => 'https://posumoms.netlify.app/login',
+                        'login_url' => 'https://posuechague.site/login',
                     ])
                 );
             } catch (\Exception $emailError) {
@@ -1825,12 +2084,12 @@ $yearlyTrends = Transaction::selectRaw('YEAR(date_time) as year, COUNT(*) as cou
         AuditLogger::log(
             $actor,
             'Transaction Updated',
-            'All Violators',
+            'Transaction',
             $transaction->id,
             $ticketLabel,
             [],
             $request,
-            "$actorName $verb the payment status for $ticketLabel"
+            "$actorName $verb $ticketLabel"
         );
 
         return response()->json([
