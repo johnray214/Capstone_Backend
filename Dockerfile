@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
         zip \
         unzip \
         curl \
+        git \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install gd pdo pdo_mysql zip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -20,7 +21,10 @@ COPY . .
 
 # Install Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-RUN composer install --no-dev --optimize-autoloader
+
+# Increase Composer timeout and prefer dist to avoid git issues
+RUN composer config --global process-timeout 2000
+RUN composer install --no-dev --optimize-autoloader --prefer-dist
 
 # Expose port and run the application
 EXPOSE 8080
