@@ -5,6 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\Violator;
+use App\Models\Admin;
+use App\Models\Deputy;
+use App\Models\Head;
+use App\Models\Enforcer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -44,8 +48,6 @@ class AuthController extends Controller
     }
 
 
-    // Removed old mixed login() method. Use loginOfficials() and loginViolator().
-
     /**
      * Login for Admin/Deputy/Head only
      */
@@ -60,6 +62,16 @@ class AuthController extends Controller
         $password = $request->password;
 
         $user = $this->getUserModelByIdentifier($identifier);
+
+        // Debug: log model, status, and isActive()
+    if ($user) {
+        Log::info('Login attempt', [
+            'model' => class_basename($user),
+            'id' => $user->id,
+            'status' => $user->status,
+            'isActive' => $user->isActive()
+        ]);
+    }
 
         if ($user && Hash::check($password, $user->password)) {
             if (!$user->isActive()) {
@@ -189,8 +201,8 @@ class AuthController extends Controller
                         ]
                     );
                     
-                    $apiBase = rtrim(env('APP_URL'), '/');
-                    $verificationUrl = $apiBase . '/api/verify-email?token=' . $verificationToken . '&email=' . urlencode($violator->email);
+                    $backendBaseUrl = config('app.url');
+                    $verificationUrl = rtrim($backendBaseUrl, '/') . '/backend/api/verify-email?token=' . $verificationToken . '&email=' . urlencode($violator->email);
                     
                     Mail::to($violator->email)->send(
                         new POSUEmail('account_verification', [
@@ -251,21 +263,32 @@ class AuthController extends Controller
             $violator = Violator::where('email', $email)->first();
             
             if (!$violator) {
+                // If not a violator, check if email belongs to an official to redirect them properly
+                $isOfficial = Admin::where('email', $email)->exists()
+                    || Deputy::where('email', $email)->exists()
+                    || Head::where('email', $email)->exists()
+                    || Enforcer::where('email', $email)->exists();
+
                 if (!$request->expectsJson()) {
-                    $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                    return redirect($frontendBase . '/login?error=true&message=' . urlencode('Violator not found.'));
+                    if ($isOfficial) {
+                        $officialsLogin = env('FRONTEND_OFFICIALS_URL', 'http://localhost:8080/officials-login');
+                        return redirect(rtrim($officialsLogin, '/') . '?error=true&message=' . urlencode('Email verification is not required for officials. Please sign in.'));
+                    }
+                    $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                    return redirect(rtrim($loginUrl, '/') . '?error=true&message=' . urlencode('Violator not found.'));
                 }
+
                 return response()->json([
                     'success' => false,
-                    'message' => 'Violator not found.'
+                    'message' => $isOfficial ? 'Email verification is not required for officials.' : 'Violator not found.'
                 ], 404);
             }
 
             // Check if already verified
             if ($violator->hasVerifiedEmail()) {
                 if (!$request->expectsJson()) {
-                    $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                    return redirect($frontendBase . '/login?verified=true&message=' . urlencode('Email is already verified. You can login now.'));
+                    $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                    return redirect(rtrim($loginUrl, '/') . '?verified=true&message=' . urlencode('Email is already verified. You can login now.'));
                 }
                 return response()->json([
                     'success' => true,
@@ -280,8 +303,8 @@ class AuthController extends Controller
 
             if (!$verificationRecord || !Hash::check($token, $verificationRecord->token)) {
                 if (!$request->expectsJson()) {
-                    $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                    return redirect($frontendBase . '/login?error=true&message=' . urlencode('Invalid or expired verification token.'));
+                    $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                    return redirect(rtrim($loginUrl, '/') . '?error=true&message=' . urlencode('Invalid or expired verification token.'));
                 }
                 return response()->json([
                     'success' => false,
@@ -292,8 +315,8 @@ class AuthController extends Controller
             // Check if token is not expired (24 hours)
             if (now()->diffInHours($verificationRecord->created_at) > 24) {
                 if (!$request->expectsJson()) {
-                    $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                    return redirect($frontendBase . '/login?error=true&message=' . urlencode('Verification token has expired. Please request a new one.'));
+                    $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                    return redirect(rtrim($loginUrl, '/') . '?error=true&message=' . urlencode('Verification token has expired. Please request a new one.'));
                 }
                 return response()->json([
                     'success' => false,
@@ -310,10 +333,10 @@ class AuthController extends Controller
                 ->where('email', $email . '|verification')
                 ->delete();
 
-            // If this is a direct email click (no Accept: application/json header), redirect to login
+            // If this is a direct email click (no Accept: application/json header), redirect to violator login
             if (!$request->expectsJson()) {
-                $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                return redirect($frontendBase . '/login?verified=true&message=' . urlencode('Email verified successfully. You can now login to your account.'));
+                $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                return redirect(rtrim($loginUrl, '/') . '?verified=true&message=' . urlencode('Email verified successfully. You can now login to your account.'));
             }
 
             return response()->json([
@@ -323,8 +346,8 @@ class AuthController extends Controller
 
         } catch (\Exception $e) {
             if (!$request->expectsJson()) {
-                $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-                return redirect($frontendBase . '/login?error=true&message=' . urlencode('Email verification failed. Please try again.'));
+                $loginUrl = env('FRONTEND_LOGIN_URL', 'http://localhost:8080/login');
+                return redirect(rtrim($loginUrl, '/') . '?error=true&message=' . urlencode('Email verification failed. Please try again.'));
             }
             return response()->json([
                 'success' => false,
@@ -384,8 +407,8 @@ class AuthController extends Controller
             
             // Create a unique identifier that includes the user type
             $emailWithType = $user->email . '|' . strtolower($userType);
-            $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-            $resetUrl = $frontendBase . '/reset-password?token=' . $token . '&email=' . urlencode($emailWithType);
+            $frontendResetBase = env('FRONTEND_RESET_URL', env('FRONTEND_LOGIN_URL', 'http://localhost:8080') . '/reset-password');
+            $resetUrl = rtrim($frontendResetBase, '/') . '?token=' . $token . '&email=' . urlencode($emailWithType);
             
             // Store reset token in the password_reset_tokens table
             DB::table('password_reset_tokens')->updateOrInsert(
@@ -398,10 +421,13 @@ class AuthController extends Controller
 
             // Send password reset email
             try {
+                Log::info('Forgot password (Violator) - email check', ['email' => $user->email, 'user' => $user]);
+
                 $fullName = trim($user->first_name . ' ' . ($user->middle_name ? $user->middle_name . ' ' : '') . $user->last_name);
                 
                 Mail::to($user->email)->send(
                     new POSUEmail('password_reset', [
+                        'email' => $user->email,
                         'user_name' => $user->first_name,
                         'full_name' => $fullName,
                         'reset_url' => $resetUrl,
@@ -500,8 +526,8 @@ class AuthController extends Controller
             
             // Create a unique identifier that includes the user type
             $emailWithType = $user->email . '|' . strtolower($userType);
-            $frontendBase = rtrim(env('FRONTEND_BASE_URL', 'https://posumoms.netlify.app'), '/');
-            $resetUrl = $frontendBase . '/reset-password?token=' . $token . '&email=' . urlencode($emailWithType);
+            $frontendResetBase = env('FRONTEND_RESET_URL', env('FRONTEND_LOGIN_URL', 'http://localhost:8080') . '/reset-password');
+            $resetUrl = rtrim($frontendResetBase, '/') . '?token=' . $token . '&email=' . urlencode($emailWithType);
             
             // Store reset token in the password_reset_tokens table
             DB::table('password_reset_tokens')->updateOrInsert(
