@@ -46,7 +46,7 @@ class Deputy extends Authenticatable
 
     public function isActive()
     {
-        return $this->status === 'active';
+        return trim(strtolower($this->status)) === 'activated';
     }
 
     public function transactions()
