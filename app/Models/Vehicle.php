@@ -5,11 +5,13 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Crypt;
 
 class Vehicle extends Model
 {
     use HasFactory, SoftDeletes;
-
+    protected $hidden = [];
+    
     protected $fillable = [
         'violators_id',
         'owner_first_name',
@@ -24,6 +26,31 @@ class Vehicle extends Model
         'owner_province',
         'vehicle_type',
     ];
+
+    /** 🔹 Encryption/Decryption Mutators & Accessors */
+    
+    // Plate Number - Encrypt before saving
+    public function setPlateNumberAttribute($value)
+    {
+        if ($value) {
+            $this->attributes['plate_number'] = Crypt::encryptString($value);
+        } else {
+            $this->attributes['plate_number'] = null;
+        }
+    }
+
+    // Plate Number - Decrypt when retrieving
+    public function getPlateNumberAttribute($value)
+    {
+        if ($value) {
+            try {
+                return Crypt::decryptString($value);
+            } catch (\Exception $e) {
+                return null; // Return null if decryption fails
+            }
+        }
+        return null;
+    }
 
     /**
      * Vehicle belongs to a Violator (driver who was caught)
