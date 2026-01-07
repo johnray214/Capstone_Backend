@@ -1713,18 +1713,13 @@ private function reverseGeocodeLocation($latitude, $longitude)
             } else {
                 $vehicle->owner_full_name = $vehicle->ownerName();
             }
-        $vehicle->append([]);
-        if ($vehicle->violator) {
-            $vehicle->violator->append([]);
-        }
-        
-        return $vehicle;
-    });
+            return $vehicle;
+        });
 
         return response()->json([
-        'status' => 'success',
-        'data'   => $vehicles->toArray()
-    ]);
+            'status' => 'success',
+            'data'   => $vehicles
+        ]);
     }
 
     public function updateVehicle(Request $request, $id)
@@ -1971,23 +1966,15 @@ private function reverseGeocodeLocation($latitude, $longitude)
             }
         }
 
-                $transactions = $transactions->paginate($perPage, ['*'], 'page', $page);
+        $transactions = $transactions->paginate($perPage, ['*'], 'page', $page);
 
         $totalsByViolator = Transaction::selectRaw('violator_id, SUM(fine_amount) as total_amount')
             ->groupBy('violator_id')
             ->pluck('total_amount', 'violator_id');
 
         $transactions->getCollection()->transform(function ($transaction) use ($totalsByViolator) {
-            // ✅ Force decryption of violator's encrypted fields
             if ($transaction->violator) {
-                $transaction->violator->license_number = $transaction->violator->license_number;
-                $transaction->violator->mobile_number = $transaction->violator->mobile_number;
                 $transaction->violator->total_amount = $totalsByViolator[$transaction->violator->id] ?? 0;
-            }
-
-            // ✅ Force decryption of vehicle's plate_number
-            if ($transaction->vehicle) {
-                $transaction->vehicle->plate_number = $transaction->vehicle->plate_number;
             }
 
             // Process location field - convert generic locations to better names
@@ -2029,16 +2016,16 @@ private function reverseGeocodeLocation($latitude, $longitude)
 
         return response()->json(['status' => 'success', 'data' => $transactions]);
         
-    } catch (\Exception $e) {
-        Log::error('Error in getTransactions: ' . $e->getMessage());
-        Log::error('Stack trace: ' . $e->getTraceAsString());
-        
-        return response()->json([
-            'status' => 'error',
-            'message' => 'Failed to load transactions: ' . $e->getMessage()
-        ], 500);
+        } catch (\Exception $e) {
+            \Log::error('Error in getTransactions: ' . $e->getMessage());
+            \Log::error('Stack trace: ' . $e->getTraceAsString());
+            
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to load transactions: ' . $e->getMessage()
+            ], 500);
+        }
     }
-}
 
     public function updateTransaction(Request $request, $id)
     {
