@@ -1937,17 +1937,28 @@ private function reverseGeocodeLocation($latitude, $longitude)
         }
 
         if ($repeat !== '' && $repeat !== null) {
-            $isRepeat = filter_var($repeat, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
-            if ($isRepeat === true) {
-                $transactions->whereHas('violator', function ($vq) {
-                    $vq->has('transactions', '>=', 2);
-                });
-            } elseif ($isRepeat === false) {
-                $transactions->whereHas('violator', function ($vq) {
-                    $vq->has('transactions', '<=', 1);
-                });
-            }
-        }
+    $isRepeat = filter_var($repeat, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+
+    if ($isRepeat === true) {
+        // Repeat offenders: 2 or more violations
+        $transactions->whereHas('violator', function ($q) {
+            $q->whereHas('transactions', function ($sub) {
+                $sub->selectRaw('violator_id')
+                    ->groupBy('violator_id')
+                    ->havingRaw('COUNT(*) >= 2');
+            });
+        });
+    } elseif ($isRepeat === false) {
+        // First-time offenders: exactly 1 violation
+        $transactions->whereHas('violator', function ($q) {
+            $q->whereHas('transactions', function ($sub) {
+                $sub->selectRaw('violator_id')
+                    ->groupBy('violator_id')
+                    ->havingRaw('COUNT(*) = 1');
+            });
+        });
+    }
+}
 
         // Date filters
         if (!empty($dateFrom) && !empty($dateTo)) {
