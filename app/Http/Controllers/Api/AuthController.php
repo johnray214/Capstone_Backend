@@ -157,7 +157,8 @@ class AuthController extends Controller
             'password' => 'required|string|min:6|confirmed',
         ]);
 
-        $identifier = $request->identifier;
+        $identifier = trim($request->identifier);
+        Log::info('DEBUG IDENTIFIER:', ['identifier' => $request->identifier]);
         $violator = null;
         if (filter_var($identifier, FILTER_VALIDATE_EMAIL)) {
             $violator = Violator::where('email', $identifier)->first();
